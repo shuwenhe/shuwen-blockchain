@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"sort"
+	"strings"
 
 	"golang.org/x/net/websocket"
 )
@@ -31,7 +33,7 @@ type Block struct {
 var genesisBlock = &Block{
 	Index:        0,
 	PreviousHash: "0",
-	Timestamp:    1604190255,
+	Timestamp:    1604190255,         // 每个区块按照时间顺序层层嵌套
 	Data:         "my genesis block", // Genesis Block is the first block in the blockChain
 	Hash:         "966634ebf2fc135707d6753692bf4b1e",
 }
@@ -62,8 +64,7 @@ func (b ByIndex) Less(i, j int) bool {
 	return b[i].Index < b[j].Index
 }
 
-// ResponseBlockchain struct
-type ResponseBlockchain struct {
+type ResponseBlockchain struct { // ResponseBlockchain struct
 	Type int    `json:"type,omitempty"`
 	Data string `json:"data,omitempty"`
 }
@@ -242,6 +243,76 @@ func queryLatestMsg() []byte {
 	return nil
 }
 
+func handleBlocks(w http.ResponseWriter, r *http.Request) {
+	bs, err := json.Marshal(blockChain)
+	if err != nil {
+		return
+	}
+	i, err := w.Write(bs)
+	if err != nil {
+		return
+	}
+	fmt.Println("i = ", i)
+}
+
+func handleMineBlock(w http.ResponseWriter, r *http.Request) {
+	var v struct {
+		Data string `json:"data,omitempty"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
+	err := decoder.Decode(&v)
+	if err != nil {
+		w.WriteHeader(http.StatusGone)
+		log.Println("[API] invalid block data:", err.Error())
+		w.Write([]byte("invalid block data." + err.Error() + "\n"))
+		return
+	}
+}
+
+func handlePeers(w http.ResponseWriter, r *http.Request) {
+	var slice []string
+	for _, socket := range sockets {
+		if socket.IsClientConn() {
+			slice = append(slice, strings.Replace(socket.LocalAddr().String(), "ws://", "", 1))
+		} else {
+			slice = append(slice, socket.Request().RemoteAddr)
+		}
+	}
+	bs, _ := json.Marshal(slice)
+	w.Write(bs)
+}
+
+func handleAddPeer(w http.ResponseWriter, r *http.Request) {
+	var v struct {
+		Peer string `json:"peer,omitempty"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
+	err := decoder.Decode(&v)
+	if err != nil {
+		w.WriteHeader(http.StatusGone)
+		log.Println("[API] invalid peer data:", err.Error())
+		w.Write([]byte("invalid peer data." + err.Error()))
+		return
+	}
+	connectToPeers([]string{v.Peer})
+}
+
 func main() {
-	fmt.Println("shuwen-blockchain")
+	flag.Parse()
+	connectToPeers(strings.Split(*InitialPeers, ","))
+
+	http.HandleFunc("/blocks", handleBlocks)
+	http.HandleFunc("/mine_block", handleMineBlock)
+	http.HandleFunc("/peers", handlePeers)
+	http.HandleFunc("add_peer", handleAddPeer)
+
+	go func() {
+		log.Println("Listen HTTP on", *httpPort)
+		errFatal("start api server", http.ListenAndServe(*httpPort, nil))
+	}()
+	http.Handle("/", websocket.Handler(wsHandleP2P))
+	log.Println("Listen p2p on", *p2pPort)
+	errFatal("start p2p server", http.ListenAndServe(*p2pPort, nil))
 }
