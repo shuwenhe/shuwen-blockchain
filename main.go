@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,7 +22,7 @@ const (
 type Block struct {
 	Index        int64  `json:"index,omitempty"`
 	PreviousHash string `json:"previous_hash,omitempty"`
-	Timestamp    int64  `json:"timestamp,omitempty"`
+	Timestamp    int64  `json:"timestamp,omitempty"` // Each block is nested in chronological order
 	Data         string `json:"data,omitempty"`
 	Hash         string `json:"hash,omitempty"`
 }
@@ -31,13 +32,13 @@ var genesisBlock = &Block{
 	Index:        0,
 	PreviousHash: "0",
 	Timestamp:    1604190255,
-	Data:         "my genesis block",
+	Data:         "my genesis block", // Genesis Block is the first block in the blockChain
 	Hash:         "966634ebf2fc135707d6753692bf4b1e",
 }
 
 var (
 	sockets      []*websocket.Conn
-	blockChain   = []*Block{genesisBlock}
+	blockChain   = []*Block{genesisBlock} // Block Chain
 	httpPort     = flag.String("api", "3001", "Api server port!")
 	p2pPort      = flag.String("p2p", ":6001", "p2p server port!")
 	InitialPeers = flag.String("peers", "ws://localhost:6001", "initial peers!")
@@ -150,17 +151,81 @@ func handleBlockChainResponse(msg []byte) {
 		return
 	}
 	sort.Sort(ByIndex(receivedBlocks))
-	latestBlockReceived := receivedBlocks[len(receivedBlocks)-1]
+	latestBlockReceived := receivedBlocks[len(receivedBlocks)-1] // Lastest received blocks
 	latestBlockHeld := getLatestBlock()
+	if latestBlockReceived.Index > latestBlockHeld.Index {
+		log.Printf("blockchain possibly behind. We got:%d Peer got:%d", latestBlockHeld.Index, latestBlockReceived.Index)
+		if latestBlockHeld.Hash == latestBlockReceived.PreviousHash {
+			log.Println("We can append the received block to our chain")
+			blockChain = append(blockChain, latestBlockReceived)
+		} else if len(receivedBlocks) == 1 {
+			log.Println("We have to query the chain from our peer.")
+			broadcast(queryAllMsg())
+		} else {
+			log.Println("Received blockchain is longer than current blockchain!")
+			replaceChain(receivedBlocks)
+		}
+	} else {
+		log.Println("Received blockchain is not longer than current blockchain!")
+	}
+}
 
+func calculateHashForBlock(b *Block) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%d%s%d%s", b.Index, b.PreviousHash, b.Timestamp, b.Data))))
+}
+
+func isValidNewBlock(nb, pb *Block) (ok bool) {
+	if nb.Hash == calculateHashForBlock(nb) && pb.Index+1 == nb.Index && pb.Hash == nb.PreviousHash {
+		ok = true
+	}
+	return
+}
+
+func isValidChain(bc []*Block) bool {
+	if bc[0].String() != genesisBlock.String() {
+		log.Println("No same GenesisBlock.", bc[0].String())
+		return false
+	}
+	temp := []*Block{bc[0]}
+	for i := 1; i < len(bc); i++ {
+		if isValidNewBlock(bc[i], temp[i-1]) {
+			temp = append(temp, bc[i])
+		} else {
+			return false
+		}
+	}
+	return true
+}
+
+func replaceChain(bc []*Block) {
+	if isValidChain(bc) && len(bc) > len(blockChain) {
+		log.Println("Received blockchain is valid.Replacing current blockchain with received blockchain!")
+		blockChain = bc
+		broadcast(responseLatestMsg())
+	} else {
+		log.Println("Received blockchain invalid!")
+	}
+}
+
+func queryAllMsg() []byte {
+	return []byte(fmt.Sprintf("{\"type\":%d}", queryAll))
+}
+
+func broadcast(msg []byte) {
+	for n, socket := range sockets {
+		_, err := socket.Write(msg)
+		if err != nil {
+			log.Printf("peer[%s]disconnected", socket.RemoteAddr().String())
+			sockets = append(sockets[0:n], sockets[n+1:]...)
+		}
+	}
 }
 
 func getLatestBlock() (b *Block) {
 	return blockChain[len(blockChain)-1]
 }
 
-// ResponseLatestMsg response latest msg
-func responseLatestMsg() (bs []byte) {
+func responseLatestMsg() (bs []byte) { // ResponseLatestMsg response latest msg
 	v := &ResponseBlockchain{
 		Type: responseBlockchain,
 	}
