@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"sort"
 
 	"golang.org/x/net/websocket"
 )
@@ -75,9 +78,103 @@ func connectToPeers(peersPort []string) { // p2p
 		if peer == "" {
 			continue
 		}
-		websocket.Dial(peer, "", peer)
-
+		ws, err := websocket.Dial(peer, "", peer)
+		if err != nil {
+			log.Println("dial to peer", err)
+			continue
+		}
+		initConnection(ws)
 	}
+}
+
+func initConnection(ws *websocket.Conn) {
+	go wsHandleP2P(ws)
+	log.Println("query lastest block.")
+	ws.Write(queryLatestMsg())
+}
+
+func wsHandleP2P(ws *websocket.Conn) {
+	var (
+		v    = &ResponseBlockchain{}
+		peer = ws.LocalAddr().String()
+	)
+
+	sockets = append(sockets, ws)
+	for {
+		var msg []byte
+		err := websocket.Message.Receive(ws, &msg)
+		if err == io.EOF {
+			log.Printf("p2p Peer[%s] shutdown, remove it form peers pool.\n", peer)
+			break
+		}
+		if err != nil {
+			log.Println("Can't recevie p2p msg from", peer, err.Error())
+			break
+		}
+		log.Printf("Received[from %s]:%s.\n", peer, msg)
+		err = json.Unmarshal(msg, v)
+		if err != nil {
+			errFatal("invalid p2p msg", err)
+		}
+
+		switch v.Type {
+		case queryLatest:
+			v.Type = responseBlockchain
+			bs := responseLatestMsg()
+			log.Printf("reponseLaestMsg:%s\n", bs)
+			ws.Write(bs)
+		case queryAll:
+			d, err := json.Marshal(blockChain)
+			if err != nil {
+				return
+			}
+			v.Type = responseBlockchain
+			v.Data = string(d)
+			bs, err := json.Marshal(v)
+			if err != nil {
+				return
+			}
+			log.Printf("responseChainMsg:%s\n", bs)
+			ws.Write(bs)
+		case responseBlockchain:
+			handleBlockChainResponse([]byte(v.Data))
+		}
+	}
+}
+
+func handleBlockChainResponse(msg []byte) {
+	receivedBlocks := []*Block{}
+	err := json.Unmarshal(msg, &receivedBlocks)
+	if err != nil {
+		errFatal("invalid blockchain", err)
+		return
+	}
+	sort.Sort(ByIndex(receivedBlocks))
+	latestBlockReceived := receivedBlocks[len(receivedBlocks)-1]
+	latestBlockHeld := getLatestBlock()
+
+}
+
+func getLatestBlock() (b *Block) {
+	return blockChain[len(blockChain)-1]
+}
+
+// ResponseLatestMsg response latest msg
+func responseLatestMsg() (bs []byte) {
+	v := &ResponseBlockchain{
+		Type: responseBlockchain,
+	}
+	d, _ := json.Marshal(blockChain[len(blockChain)-1:])
+	v.Data = string(d)
+	bs, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return bs
+}
+
+func queryLatestMsg() []byte {
+	return nil
 }
 
 func main() {
